@@ -10,9 +10,6 @@ from .forms import LoginForm
 def secret():
     return 'Only authenticated users are allowed!'
 
-@auth.route('/login')
-def login():
-    return render_template('auth/login.html')
 
 @auth.route('/login', methods=['GET', 'POST'])
 def login():
@@ -25,6 +22,13 @@ def login():
         flash('Invalid username or password')
     return render_template('auth/login.html', form=form)
 
+@auth.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    flash('You have been logged out.')
+    return reditect(url_for('main.index'))
+
 @auth.route('/register', methods=['GET', 'POST'])
 def register():
     form = RegistrationForm()
@@ -33,6 +37,10 @@ def register():
                     username=form.username.data,
                     password=form.password.data)
         db.session.add(user)
-        flash('You can now login.')
-        return reditect(url_for('auth.login'))
+        db.session.commit()
+        token = user.generate_confirmation_token()
+        send_email(user.email, 'Confirm Your Account',
+                   'auth/email/confirm', user=user, token=token)
+        flash('A confirmation email has been sent to you by email.')
+        return reditect(url_for('main.index'))
     return render_template('auth/register.html', form=form)
