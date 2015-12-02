@@ -1,8 +1,14 @@
+from datetime import datetime
 import hashlib
 from flask import request
 from flask.ext.login import UserMixin, AnonymousUserMixin
 from werkzeug.security import generate_password_hash, check_password_hash
-from . import login_manager
+from itsdangerous import TimedJSONWebSignatureSerializer as Serializer
+from markdown import markdown
+import bleach
+from flask import current_app, request, url_for
+#from app.exceptions import ValidationError
+from . import login_manager, db 
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -55,7 +61,7 @@ class User(UserMixin, db.Model):
     username = db.Column(db.String(64), unique=True, index=True)
     password_hash = db.Column(db.String(128))
     role_id = db.Column(db.Integer, db.ForeignKey('roles.id'))
-    confirmed = db.Column({'confirm': self.id})
+    confirmed = db.Column(db.Boolean, default=False)
 
     name = db.Column(db.String(64))
     location = db.Column(db.String(64))
