@@ -73,6 +73,17 @@ class User(UserMixin, db.Model):
 
     avatar_hash = db.Column(db.String(32))
 
+    followed = db.relationship('Follow', 
+                               foreign_kwys=[Follow.follower_id],
+                               backref=db.backref('follower', lazy='joined'),
+                               lazy='dynamic',
+                               cascade='all, delete-orphan')
+    followers = db.relationship('Follow',
+                                foreign_kwys=[Follow.followed_id],
+                                backref=db.backref('followed', lazy='joined'),
+                                lazy='dynamic',
+                                cascade='all, delete-orphan')
+
     def __init__(self, **kwargs):
         super(User, self).__init__(**kwargs)
         if self.role is None:
@@ -162,6 +173,24 @@ class User(UserMixin, db.Model):
                 db.session.rollback()
 
 
+        def follow(self, user):
+            if not self.is_following(user):
+                f = Follow(follower=self, followed=user)
+                db.session.add(f)
+
+        def unfollow(self, user):
+            f = self.followed.filter_by(followed_id=user.id).first()
+            if f:
+                db.session.delete(f)
+
+        def is_following(self, user):
+            return self.followed.filter_by(
+                followed_id=user.id).first() is not None
+
+        def is_followed_by(self, user):
+            return self.followers.filter_by(
+                follower_id=user.id).first() is not None
+
 
 class AnonymousUser(AnonymousUserMixin):
     def can(self, permissions):
@@ -179,6 +208,7 @@ class Post(db.Model):
     body = db.Column(db.Text)
     timestamp = db.Column(db.DateTime, index=True, default=datetime.utcnow)
     author_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    body_html =db.Column(db.Text)
 
     @staticmethod
     def generate_fake(count=100):
@@ -205,3 +235,12 @@ class Post(db.Model):
             tags=allowed_tags, strip=True))
 
 db.event.listen(Post.body, 'set', Post.on_changed_body)
+
+
+class Follow(de.Model):
+    __tablename__ = 'follows'
+    follows_id = db.Column(db.Integer, db.ForeignKey('users.id'),
+                           primary_key=True)
+    followed_id = db.Column(db.Integer, db.ForeignKey('users.id'),
+                            primary_key=True)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
