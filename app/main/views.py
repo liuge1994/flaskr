@@ -4,12 +4,34 @@ from flask import render_template, session, redirect, url_for, abort, flash, \
     request, current_app, make_response
 from flask.ext.login import login_required, current_user
 from flask.ext.sqlalchemy import get_debug_queries
-from datetime import datetime
 from . import main
-from .forms import EditProfileForm, EditProfileAdminForm, PostForm
+from .forms import EditProfileForm, EditProfileAdminForm, PostForm,\
+    CommentForm
 from .. import db
-from ..models import User, Permission, Role, Post
+from ..models import User, Permission, Role, Post, Comment
 from ..decorators import admin_required, permission_required
+
+
+@main.after_app_request
+def after_request(response):
+    for query in get_debug_queries():
+        if query.duration >= current_app.config['FLASKY_SLOW_DB_QUERY_TIME']:
+            current_app.logger.warning(
+                'Slow query: %s\nParameters: %s\nDuration: %fs\nContext: %s\n'
+                % (query.statement, query.parameters, query.duration,
+                   query.context))
+    return response
+
+
+@main.route('/shutdown')
+def server_shutdown():
+    if not current_app.testing:
+        abort(404)
+    shutdown = request.environ.get('werkzeug.server.shutdown')
+    if not shutdown:
+        abort(500)
+    shutdown()
+    return 'Shutting down...'
 
 
 @main.route('/', methods=['GET', 'POST'])
@@ -39,11 +61,15 @@ def index():
 
 @main.route('/user/<username>')
 def user(username):
-    user = User.query.filter_by(username=username).first()
-    if user is None:
-        abort(404)
-    posts = user.posts.order_by(Post.timestamp.desc()).all()
-    return render_template('user.html', user=user, posts=posts)
+    user = User.query.filter_by(username=username).first_or_404()
+    page = request.args.get('page', 1, type=int)
+    pagination = user.posts.order_by(Post.timestamp.desc()).paginate(
+        page, per_page=current_app.config['FLASKY_POSTS_PER_PAGE'],
+        error_out=False)
+    posts = pagination.items
+    return render_template('user.html', user=user, posts=posts,
+                           pagination=pagination)
+
 
 @main.route('/edit-profile', methods=['GET', 'POST'])
 @login_required
@@ -60,6 +86,7 @@ def edit_profile():
     form.location.data = current_user.location
     form.about_me.data = current_user.about_me
     return render_template('edit_profile.html', form=form)
+
 
 @main.route('/edit-profile/<int:id>', methods=['GET', 'POST'])
 @login_required
@@ -80,6 +107,7 @@ def edit_profile_admin(id):
         return redirect(url_for('.user', username=user.username))
     form.email.data = user.email
     form.username.data = user.username
+    form.confirmed.data = user.confirmed
     form.role.data = user.role_id
     form.name.data = user.name
     form.location.data = user.location
@@ -101,14 +129,13 @@ def post(id):
     page = request.args.get('page', 1, type=int)
     if page == -1:
         page = (post.comments.count() - 1) /\
-               current_app.config['FLASKY_POSTS_PER_PAGE'] + 2
+               current_app.config['FLASKY_POSTS_PER_PAGE'] + 1
     pagination = post.comments.order_by(Comment.timestamp.asc()).pagination(
         page, per_page=current_app.config['FLASKY_POSTS_PER_PAGE'], 
         error_out=False)
     comments = pagination.items
     return render_template('post.html', posts=[post], form=form,
                            comments=comments, pagination=pagination)
-
 
 
 @main.route('/edit/<int:id>', methods=['GET', 'POST'])
@@ -140,7 +167,23 @@ def follow(username):
         flash('You are already following this user.')
         return redirect(url_for('.user', username=username))
     current_user.follow(user)
-    flash('You are now following %s.', % username)
+    flash('You are now following %s.' % username)
+    return redirect(url_for('.user', username=username))
+
+
+@main.route('/unfollow/<username>')
+@login_required
+@permission_required(Permission.FOLLOW)
+def unfollow(username):
+    user = User.query.filter_by(username=username).first()
+    if user is None:
+        flash('Invaild user.')
+        return redirect(url_for('.index'))
+    if not current_user.is_following(user):
+        flash('You are not following this user.')
+        return redirect(url_for('.user', username=username))
+    current_user.unfollow(user)
+    flash('You are not following %s anymore.' % username)
     return redirect(url_for('.user', username=username))
 
 
@@ -152,12 +195,29 @@ def followers(username):
         return redirect(url_for('.index'))
     page = request.args.get('page', 1, type=int)
     pagination = user.followers.pagination(
-        page, per_page=current_app.config['FALSKY_FOLLOWERS_PER_PAGE'],
+        page, per_page=current_app.config['FLASKY_FOLLOWERS_PER_PAGE'],
         error_out=False)
     follows = [{'user': item.follower, 'timestamp': item.timestamp}
                for item in pagination.items]
     return render_template('followers.html', user=user, title="Followers of",
                            endpoint='.followers', pagination=pagination,
+                           follows=follows)
+
+
+@main.route('/followed-by/<username>')
+def followed_by(username):
+    user = User.query.filter_by(username=username).first()
+    if user is None:
+        flash('Invaild user.')
+        return redirect(url_for('.index'))
+    page = request.args.get('page', 1, type=int)
+    pagination = user.followed.pagination(
+        page, per_page=current_app.config['FLASKY_FOLLOWERS_PER_PAGE'],
+        error_out=False)
+    follows = [{'user': item.followed, 'timestamp': item.timestamp}
+               for itme in pagination.items]
+    return render_template('followers.html', user=user, title="Followed by",
+                           endpoint='.followed_by', pagination=pagination,
                            follows=follows)
 
 
@@ -175,6 +235,19 @@ def show_followed():
     resp = make_response(redirect(url_for('.index')))
     resp.set_cookie('show_followed', '1', max_age=30*24*60*60)
     return resp
+
+
+@main.route('/moderate')
+@login_required
+@permission_required(Permission.MODERATE_COMMENTS)
+def moderate():
+    page = request.args.get('page', 1, type=int)
+    pagination = Comment.query.order_by(Comment.timestamp.desc()).paginate(
+        page, per_page=current_app.config['FLASKY_COMMENTS_PER_PAGE'],
+        error_out=False)
+    comments = pagination.items
+    return render_template('moderate.html', comments=comments,
+                           pagination=pagination, page=page)
 
 
 @main.route('/moderate/enable/<int:id>')
